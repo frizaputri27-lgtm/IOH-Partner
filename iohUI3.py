@@ -296,6 +296,116 @@ def get_stock_values(df, region):
             break
     return ga, fwa
 
+# --- FUNGSI UPFRONT TRI DARI PRIM SHEET ---
+def get_upfront_data_tri(df, region, debug=False):
+    """
+    Baca data dari sheet PRIM untuk TRI Kiosk
+    
+    Parameters:
+    - df: DataFrame dari sheet PRIM
+    - region: Wilayah yang dicari (misal: KEDAMEAN)
+    - debug: Tampilkan debug info (default: False)
+    
+    Returns:
+    - total_amount: Total Amount yang difilter
+    - breakdown_df: DataFrame breakdown per SDP
+    """
+    
+    if df is None or len(df) == 0:
+        if debug:
+            print("⚠️ Sheet PRIM kosong atau tidak ditemukan")
+        return pd.DataFrame(), 0, pd.DataFrame()
+    
+    header_idx = -1
+    col_sdp, col_amount = -1, -1
+    
+    # Cari header row - identifikasi kolom SDP dan AMOUNT
+    for r in range(min(5, len(df))):
+        row_vals = [str(x).upper() for x in df.iloc[r].tolist()]
+        if "SDP" in row_vals and "AMOUNT" in row_vals:
+            header_idx = r
+            for i, v in enumerate(row_vals):
+                v_upper = str(v).upper()
+                if "SDP" in v_upper: col_sdp = i
+                if "AMOUNT" in v_upper: col_amount = i
+            break
+    
+    if debug:
+        print(f"🔍 DEBUG get_upfront_data_tri:")
+        print(f"   Header found at row: {header_idx}")
+        print(f"   Kolom: SDP={col_sdp}, Amount={col_amount}")
+    
+    if header_idx == -1 or col_sdp == -1 or col_amount == -1:
+        if debug:
+            print("❌ Header row atau kolom penting tidak ditemukan!")
+            print("   Cek apakah ada kolom 'SDP' dan 'AMOUNT' di sheet PRIM")
+        return 0, pd.DataFrame()
+    
+    region_key = region.upper().strip()
+    total_amount = 0
+    sdp_breakdown = {}
+    match_count = 0
+    
+    for idx in range(header_idx + 1, len(df)):
+        try:
+            row = df.iloc[idx]
+            
+            # Baca kolom SDP
+            val_sdp_raw = str(row[col_sdp]).strip().upper() if col_sdp != -1 else ""
+            val_sdp = val_sdp_raw.strip()
+            
+            # Skip jika SDP tidak cocok dengan wilayah
+            if not val_sdp or region_key not in val_sdp:
+                continue
+            
+            # Baca kolom AMOUNT
+            val_amount = row[col_amount]
+            
+            # Skip jika AMOUNT kosong
+            if pd.isna(val_amount) or val_amount == "":
+                continue
+            
+            try:
+                amount_val = float(val_amount)
+                total_amount += amount_val
+                
+                # Breakdown per SDP
+                if val_sdp not in sdp_breakdown:
+                    sdp_breakdown[val_sdp] = 0
+                sdp_breakdown[val_sdp] += amount_val
+                
+                match_count += 1
+                
+                if debug:
+                    print(f"   ✓ Row {idx}: SDP={val_sdp}, Amount={amount_val:,.0f}")
+                
+            except ValueError:
+                if debug:
+                    print(f"   ✗ Row {idx}: Tidak bisa convert AMOUNT '{val_amount}' ke float")
+                continue
+        
+        except Exception as e:
+            if debug:
+                print(f"   ✗ Error pada row {idx}: {str(e)}")
+            continue
+    
+    # Create breakdown dataframe
+    breakdown_data = []
+    for sdp, amount in sdp_breakdown.items():
+        breakdown_data.append({
+            "SDP": sdp,
+            "Amount": amount,
+            "Amount (Formatted)": f"Rp {amount:,.0f}"
+        })
+    breakdown_df = pd.DataFrame(breakdown_data)
+    
+    if debug:
+        print(f"   Total Rows Match: {match_count}")
+        print(f"   Total Amount: {total_amount:,.0f}")
+        print(f"   Breakdown: {sdp_breakdown}")
+    
+    return total_amount, breakdown_df
+
 # --- FUNGSI SALDO INDOSAT DENGAN BREAKDOWN PER SDP ---
 def get_daily_saldo_data_indosat(df, region, target_month_idx, debug=False):
     """
@@ -2237,23 +2347,29 @@ elif menu == "🧮 Kalkulator Strategi":
                 debug_match_count, debug_paid_in, debug_amount_debit = calculate_transaction_match(dfs, wilayah, transaction_types=['Indosat Reload', 'Purchase Data Package'], debug=True)
                 st.info(f"✓ Hasil Match: Match={debug_match_count}, Paid In={debug_paid_in}, Amount Debit={debug_amount_debit}")
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1: 
                 st.metric("Jumlah Transaksi Match", f"{t_tr_reload:,.0f}")
-            with c2: 
-                st.metric("Reload Income (2.5%)", format_idr_jt(reload_income))
-            with c3:
+            with c2:
                 st.metric("Total Amount Debit", format_idr_jt(total_debit_reload))
 
-            achievement_pct = (reload_income / total_debit_reload * 100) if total_debit_reload > 0 else 0
-            st.metric("Achievement %", f"{achievement_pct:.2f}%")
+            st.divider()
+
+            c_reload1, c_reload2, c_reload3 = st.columns(3)
+            with c_reload1:
+                st.metric("Total Paid In (Reload & Data Pack)", format_idr_jt(total_paid_in_reload))
+            with c_reload2:
+                st.metric("Reload Income (2.5%)", format_idr_jt(reload_income), delta=f"= {format_idr_jt(total_paid_in_reload)} × 2.5%", delta_color="normal")
+            with c_reload3:
+                achievement_pct = (reload_income / total_debit_reload * 100) if total_debit_reload > 0 else 0
+                st.metric("Achievement %", f"{achievement_pct:.2f}%")
 
             st.divider()
 
             # ==========================================
-            # BAGIAN 3: VOUCHER REDEMPTION (2.5%)
+            # BAGIAN 3: VOUCHER REDEMPTION
             # ==========================================
-            st.markdown("### 🎫 Voucher Redemption (2.5%)")
+            st.markdown("### 🎫 Voucher Redemption")
 
             voucher_months = st.multiselect(
                 "Pilih Bulan",
@@ -2267,9 +2383,8 @@ elif menu == "🧮 Kalkulator Strategi":
 
             for m in voucher_months:
                 val = st.number_input(f"Nominal {m}", value=0, step=100000, key=f"vc_fix_{m}")
-                reward = val * 0.025
-                total_voucher_reward += reward
-                st.markdown(f"**{m}:** Rp {val:,.0f} × 2.5% = Rp {reward:,.0f}")
+                total_voucher_reward += val
+                st.markdown(f"**{m}:** Rp {val:,.0f}")
 
             avg_voucher = total_voucher_reward / len(voucher_months) if len(voucher_months) > 0 else 0
 
@@ -2283,9 +2398,9 @@ elif menu == "🧮 Kalkulator Strategi":
             st.divider()
 
             # ==========================================
-            # BAGIAN 4: OUTER TRANSACTION (0.5%)
+            # BAGIAN 4: OUTER TRANSACTION
             # ==========================================
-            st.markdown("### 🔗 Outer Transaction (0.5%)")
+            st.markdown("### 🔗 Outer Transaction")
 
             outer_months = st.multiselect(
                 "Pilih Bulan Outer",
@@ -2299,19 +2414,17 @@ elif menu == "🧮 Kalkulator Strategi":
 
             for m in outer_months:
                 v = st.number_input(f"Nominal {m}", value=0, step=100000, key=f"ot_fix_{m}")
-                benefit = v * 0.005
-                total_outer_benefit += benefit
-                st.markdown(f"**{m}:** Rp {v:,.0f} × 0.5% = Rp {benefit:,.0f}")
+                total_outer_benefit += v
+                st.markdown(f"**{m}:** Rp {v:,.0f}")
 
             avg_outer = 0
             if len(outer_months) > 0:
-                total_outer_nominal = sum([st.session_state.get(f"ot_fix_{m}", 0) if isinstance(st.session_state.get(f"ot_fix_{m}", 0), (int, float)) else 0 for m in outer_months])
-                avg_outer = total_outer_nominal / len(outer_months)
+                avg_outer = total_outer_benefit / len(outer_months)
 
             st.divider()
             col_o1, col_o2 = st.columns(2)
             with col_o1:
-                st.metric("Total Outer Benefit (0.5%)", format_idr_jt(total_outer_benefit))
+                st.metric("Total Outer Benefit", format_idr_jt(total_outer_benefit))
             with col_o2:
                 st.metric("Rata-rata Outer per Bulan", format_idr_jt(avg_outer))
 
@@ -2321,8 +2434,6 @@ elif menu == "🧮 Kalkulator Strategi":
             # RINGKASAN TOTAL INCOME FIX
             # ==========================================
             st.markdown("## 💰 SUMMARY TOTAL INCOME FIX")
-            st.markdown("_Fokus pada Upfront Margin dari ESCM Allocation_")
-
 
             summary_cols = st.columns(4)
             with summary_cols[0]:
@@ -2344,7 +2455,185 @@ elif menu == "🧮 Kalkulator Strategi":
             st.info(f"📊 Komponen: Upfront {format_idr_jt(upfront_margin_income)} + Reload {format_idr_jt(reload_income)} + Voucher {format_idr_jt(total_voucher_reward)} + Outer {format_idr_jt(total_outer_benefit)}")
 
         else:
-            st.info("TRI belum tersedia.")
+            # ==========================================
+            # TRI KIOSK - FIX INCOME (TANPA RELOAD & DATA PACK)
+            # ==========================================
+            
+            # ==========================================
+            # BAGIAN 1: UPFRONT MARGIN (DARI PRIM SHEET)
+            # ==========================================
+            st.markdown("### 📌 UPFRONT MARGIN 1.5% (PRIM Sheet)")
+            st.markdown("_Sumber: Sheet PRIM | Filter: SDP sesuai Wilayah | Income: Amount × 1.5%_")
+            st.divider()
+
+            # Read PRIM sheet
+            upfront_sum_paid_in_tri = 0
+            prim_breakdown_df_local = pd.DataFrame()
+            
+            df_prim = get_sheet_fuzzy(dfs, "PRIM")
+            
+            if df_prim is None:
+                st.error("""
+                ❌ **Sheet PRIM tidak ditemukan!**
+                
+                Pastikan file Excel memiliki sheet bernama "PRIM" dengan kolom:
+                - SDP (berisi wilayah: KEDAMEAN, DAWARBLANDONG, SANGKAPURA)
+                - AMOUNT (berisi nilai nominal)
+                """)
+            else:
+                upfront_sum_paid_in_tri, prim_breakdown_df_local = get_upfront_data_tri(
+                    df_prim, wilayah, debug=False
+                )
+            
+            # Hitung upfront margin dari sum amount
+            upfront_margin_income_tri = upfront_sum_paid_in_tri * 0.015
+
+            # DEBUG SECTION untuk TRI UPFRONT
+            with st.expander("🔍 DEBUG: TRI PRIM Data", expanded=False):
+                st.info("**Informasi Detail Pemrosesan Sheet PRIM:**")
+                
+                if df_prim is not None:
+                    st.success("✅ Sheet PRIM ditemukan")
+                    
+                    # Show sample data
+                    st.write("**Preview 5 Baris Pertama:**")
+                    st.dataframe(df_prim.iloc[:5], use_container_width=True, height=200)
+                    
+                    st.write("**Detail Pemrosesan:**")
+                    col_tri_d1, col_tri_d2, col_tri_d3 = st.columns(3)
+                    with col_tri_d1:
+                        st.metric("Total Baris", len(df_prim))
+                    with col_tri_d2:
+                        st.metric("Total Kolom", len(df_prim.columns))
+                    with col_tri_d3:
+                        st.metric("Wilayah Filter", wilayah)
+                    
+                    # Jalankan debug
+                    st.write("**Hasil Filter Berdasarkan Wilayah:**")
+                    print("\n" + "="*60)
+                    print(f"DEBUG: Membaca sheet PRIM untuk wilayah {wilayah}")
+                    print("="*60)
+                    debug_sum_tri, debug_breakdown_tri = get_upfront_data_tri(
+                        df_prim, wilayah, debug=True
+                    )
+                    print("="*60 + "\n")
+                    
+                    st.write(f"✅ **Total Amount (PRIM):** {format_idr_jt(debug_sum_tri)}")
+                    st.write(f"✅ **Upfront Margin 1.5%:** {format_idr_jt(debug_sum_tri * 0.015)}")
+                    
+                    if not debug_breakdown_tri.empty:
+                        st.write("**Breakdown per SDP:**")
+                        st.dataframe(debug_breakdown_tri, use_container_width=True)
+                else:
+                    st.error("❌ Sheet PRIM tidak ditemukan di file Excel")
+
+            # Tampilkan Sum Amount dan Upfront Margin TRI
+            col_upfront_tri1, col_upfront_tri2 = st.columns(2)
+            
+            with col_upfront_tri1:
+                st.metric(
+                    "💰 Total Amount (PRIM)",
+                    format_idr_jt(upfront_sum_paid_in_tri),
+                    delta=f"Dari PRIM sheet - Wilayah {wilayah}",
+                    delta_color="normal"
+                )
+            
+            with col_upfront_tri2:
+                st.metric(
+                    "📈 Upfront Margin 1.5%",
+                    format_idr_jt(upfront_margin_income_tri),
+                    delta=f"= {format_idr_jt(upfront_sum_paid_in_tri)} × 1.5%",
+                    delta_color="normal"
+                )
+
+            st.divider()
+
+            # ==========================================
+            # BAGIAN 2: VOUCHER REDEMPTION
+            # ==========================================
+            st.markdown("### 🎫 Voucher Redemption")
+
+            voucher_months_tri = st.multiselect(
+                "Pilih Bulan",
+                options=list(bulan_map.keys()),
+                default=[pilih_bulan],
+                max_selections=3,
+                key="voucher_months_tri"
+            )
+
+            total_voucher_reward_tri = 0
+
+            for m in voucher_months_tri:
+                val = st.number_input(f"Nominal {m}", value=0, step=100000, key=f"vc_tri_{m}")
+                total_voucher_reward_tri += val
+                st.markdown(f"**{m}:** Rp {val:,.0f}")
+
+            avg_voucher_tri = total_voucher_reward_tri / len(voucher_months_tri) if len(voucher_months_tri) > 0 else 0
+
+            st.divider()
+            col_v1_tri, col_v2_tri = st.columns(2)
+            with col_v1_tri:
+                st.metric("Total Voucher Reward", format_idr_jt(total_voucher_reward_tri))
+            with col_v2_tri:
+                st.metric("Rata-rata Voucher per Bulan", format_idr_jt(avg_voucher_tri))
+
+            st.divider()
+
+            # ==========================================
+            # BAGIAN 3: OUTER TRANSACTION
+            # ==========================================
+            st.markdown("### 🔗 Outer Transaction")
+
+            outer_months_tri = st.multiselect(
+                "Pilih Bulan Outer",
+                options=list(bulan_map.keys()),
+                default=[pilih_bulan],
+                max_selections=3,
+                key="outer_months_tri"
+            )
+
+            total_outer_benefit_tri = 0
+
+            for m in outer_months_tri:
+                v = st.number_input(f"Nominal {m}", value=0, step=100000, key=f"ot_tri_{m}")
+                total_outer_benefit_tri += v
+                st.markdown(f"**{m}:** Rp {v:,.0f}")
+
+            avg_outer_tri = 0
+            if len(outer_months_tri) > 0:
+                avg_outer_tri = total_outer_benefit_tri / len(outer_months_tri)
+
+            st.divider()
+            col_o1_tri, col_o2_tri = st.columns(2)
+            with col_o1_tri:
+                st.metric("Total Outer Benefit", format_idr_jt(total_outer_benefit_tri))
+            with col_o2_tri:
+                st.metric("Rata-rata Outer per Bulan", format_idr_jt(avg_outer_tri))
+
+            st.divider()
+
+            # ==========================================
+            # RINGKASAN TOTAL INCOME FIX TRI
+            # ==========================================
+            st.markdown("## 💰 SUMMARY TOTAL INCOME FIX")
+            st.markdown("_Total income dari komponen Upfront, Voucher, dan Outer_")
+
+            summary_cols_tri = st.columns(3)
+            with summary_cols_tri[0]:
+                st.metric("Upfront", format_idr_jt(upfront_margin_income_tri))
+            with summary_cols_tri[1]:
+                st.metric("Voucher", format_idr_jt(total_voucher_reward_tri))
+            with summary_cols_tri[2]:
+                st.metric("Outer", format_idr_jt(total_outer_benefit_tri))
+
+            # TOTAL KESELURUHAN
+            total_income_all_tri = upfront_margin_income_tri + total_voucher_reward_tri + total_outer_benefit_tri
+
+            # Update session state dengan total benefit bulan ini
+            st.session_state.monthly_total_benefits[pilih_bulan.upper()] = total_income_all_tri
+
+            st.success(f"✅ **TOTAL INCOME FIX:** {format_idr_jt(total_income_all_tri)}")
+            st.info(f"📊 Komponen: Upfront {format_idr_jt(upfront_margin_income_tri)} + Voucher {format_idr_jt(total_voucher_reward_tri)} + Outer {format_idr_jt(total_outer_benefit_tri)}")
     
     # ==========================================
     # ==========================================
