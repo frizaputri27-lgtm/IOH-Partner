@@ -2200,8 +2200,8 @@ elif menu == "🧮 Kalkulator Strategi":
         # ==========================================
         # BAGIAN ATAS: TOTAL BENEFIT PER BULAN
         # ==========================================
-        st.markdown("### 📊 TOTAL BENEFIT PER BULAN (RATA-RATA)")
-        st.caption("Total benefit tahunan untuk setiap bulan (Upfront + Reload + Voucher + Outer)")
+        st.markdown("### 📊 TOTAL BENEFIT PER BULAN (RATA-RATA BULAN SEBELUMNYA)")
+        st.caption("Rata-rata dari benefit bulan-bulan sebelumnya yang sudah diisi")
         
         # Pilih bulan untuk melihat total benefit
         selected_month_for_avg = st.selectbox(
@@ -2211,9 +2211,25 @@ elif menu == "🧮 Kalkulator Strategi":
             key="selected_month_average"
         )
         
-        # Ambil data dari session state
+        # Hitung rata-rata dari bulan-bulan sebelumnya
         selected_month_upper = selected_month_for_avg.upper()
-        total_benefit_month = st.session_state.monthly_total_benefits.get(selected_month_upper, 0)
+        bulan_list = list(bulan_map.keys())
+        selected_month_idx = bulan_list.index(selected_month_for_avg)
+        
+        # Ambil data dari bulan-bulan sebelumnya (index 0 sampai selected_month_idx - 1)
+        previous_months_values = []
+        if selected_month_idx > 0:  # Ada bulan sebelumnya
+            for i in range(selected_month_idx):
+                month_upper = bulan_list[i].upper()
+                month_value = st.session_state.monthly_total_benefits.get(month_upper, 0)
+                if month_value > 0:  # Hanya ambil yang sudah diisi
+                    previous_months_values.append(month_value)
+        
+        # Hitung rata-rata
+        if len(previous_months_values) > 0:
+            total_benefit_month = sum(previous_months_values) / len(previous_months_values)
+        else:
+            total_benefit_month = 0
         
         # Tampilkan total benefit
         col_avg1, col_avg2 = st.columns([1, 2])
@@ -2226,11 +2242,18 @@ elif menu == "🧮 Kalkulator Strategi":
             )
         
         with col_avg2:
-            st.metric(
-                "💰 Total Benefit Bulan Ini",
-                format_idr_jt(total_benefit_month),
-                "Upfront + Reload + Voucher + Outer"
-            )
+            if total_benefit_month > 0:
+                st.metric(
+                    "💰 Total Benefit Bulan Ini",
+                    format_idr_jt(total_benefit_month),
+                    f"Rata-rata {len(previous_months_values)} bulan sebelumnya"
+                )
+            else:
+                st.metric(
+                    "💰 Total Benefit Bulan Ini",
+                    format_idr_jt(total_benefit_month),
+                    "Belum ada data bulan sebelumnya"
+                )
         
         st.divider()
         
