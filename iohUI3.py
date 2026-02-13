@@ -155,6 +155,18 @@ if "monthly_total_benefits" not in st.session_state:
         "DESEMBER": 0
     }
 
+if "tds_growth_brackets" not in st.session_state:
+    st.session_state.tds_growth_brackets = [
+        {"min_growth": 3.0, "max_growth": 5.0, "fee_percent": 2.5},
+        {"min_growth": 5.0, "max_growth": None, "fee_percent": 3.0}
+    ]
+
+if "third_income_enabled" not in st.session_state:
+    st.session_state.third_income_enabled = False
+
+if "third_income_items" not in st.session_state:
+    st.session_state.third_income_items = []
+
 def get_region_config(region_name):
     """Get configuration untuk region tertentu"""
     config = st.session_state.kpi_calculator_config
@@ -1343,7 +1355,11 @@ def calculate_metrics(config, achievement):
 def calculate_cost_shortfall(config, achievement):
     """
     Calculate cost untuk memenuhi shortfall setiap KPI
-    Rumus: Cost = (Target - Actual) × Cost Per Unit (jika actual < target)
+    
+    RUMUS BERBEDA PER KPI:
+    - Trade Supply: Cost = Cost Per Unit saja (input langsung, tanpa × Shortfall)
+    - M2S Absolute: Cost = Shortfall × Cost Per Unit
+    - RGU GA FWA: Cost = Shortfall × Cost Per Unit
     
     Parameters:
     - config: Dictionary config dengan kpi_metrics dan cost_per_unit
@@ -1366,14 +1382,24 @@ def calculate_cost_shortfall(config, achievement):
         
         # Hitung shortfall jika actual < target
         shortfall = max(0, target - actual)
-        cost = shortfall * cost_per_unit
+        
+        # PERHITUNGAN COST BERBEDA BERDASARKAN JENIS KPI
+        if metric_name == "Trade Supply":
+            # Trade Supply: COST = Cost Per Unit saja (langsung, tanpa × Shortfall)
+            cost = cost_per_unit if shortfall > 0 else 0
+            calculation_note = f"Cost Per Unit (tanpa × Shortfall)"
+        else:
+            # M2S Absolute & RGU GA FWA: COST = Shortfall × Cost Per Unit
+            cost = shortfall * cost_per_unit
+            calculation_note = f"Shortfall ({shortfall}) × Cost Per Unit ({cost_per_unit:,.0f})"
         
         cost_breakdown[metric_name] = {
             "target": target,
             "actual": actual,
             "shortfall": shortfall,
             "cost_per_unit": cost_per_unit,
-            "total_cost": cost
+            "total_cost": cost,
+            "calculation_note": calculation_note
         }
         total_cost += cost
     
@@ -1754,9 +1780,10 @@ elif menu == "🧮 Kalkulator Strategi":
     # MENU STRATEGI: 5 PILIHAN MENU
     # ==========================================
     
-    tab_sla, tab_fix, tab_total, tab_biaya = st.tabs([
+    tab_sla, tab_fix, tab_tactical, tab_total, tab_biaya = st.tabs([
         "💰 SLA/KPI Insentif",
         "📈 Fix Income",
+        "🎯 Tactical Income",
         "💵 Total Income",
         "⚡ Biaya Tambahan + Strategi"
     ])
@@ -2357,35 +2384,199 @@ elif menu == "🧮 Kalkulator Strategi":
             st.divider()
 
             # ==========================================
-            # BAGIAN 2: RELOAD & DATA PACK (2.5%) 
+            # BAGIAN 2: RELOAD & DATA PACK (TIDAK PERLU DIKALIKAN) 
             # ==========================================
-            st.markdown("### 🔄 Reload & Data Pack Income (2.5%)")
             
             # Recalculate transaction match juga
             t_tr_reload, total_paid_in_reload, total_debit_reload = calculate_transaction_match(dfs, wilayah, transaction_types=['Indosat Reload', 'Purchase Data Package'])
-            reload_income = total_paid_in_reload * 0.025
+            reload_income = 0
+            
+            # HITUNG: Total Amount_Debit (SEMUA TRANSAKSI dengan status "completed")
+            total_amount_debit_all_completed = 0
+            try:
+                df_trx = None
+                for name in dfs.keys():
+                    if "TRX" in name.upper() or "TRANSACTION" in name.upper():
+                        df_trx = dfs[name]
+                        break
+                
+                if df_trx is None:
+                    df_trx = get_sheet_fuzzy(dfs, "TRX")
+                
+                if df_trx is not None and len(df_trx) > 2:
+                    header_row = 0
+                    col_sdp_trx = -1
+                    col_area = -1
+                    col_amount_debit = -1
+                    col_status = -1
+                    
+                    for r in range(min(5, len(df_trx))):
+                        row_vals = [str(x).upper() for x in df_trx.iloc[r].tolist()]
+                        for i, v in enumerate(row_vals):
+                            v_clean = str(v).strip()
+                            if "SDP" in v_clean:
+                                col_sdp_trx = i
+                                header_row = r
+                            if "AREA" in v_clean:
+                                col_area = i
+                                header_row = r
+                            if "AMOUNT" in v_clean and "DEBIT" in v_clean:
+                                col_amount_debit = i
+                            if "TRANSACTION" in v_clean and "STATUS" in v_clean:
+                                col_status = i
+                        
+                        if (col_sdp_trx != -1 or col_area != -1) and col_amount_debit != -1 and col_status != -1:
+                            break
+                    
+                    if col_amount_debit != -1 and col_status != -1:
+                        region_upper = wilayah.upper()
+                        for idx in range(header_row + 1, len(df_trx)):
+                            try:
+                                row = df_trx.iloc[idx]
+                                
+                                val_sdp = str(row[col_sdp_trx]).upper() if col_sdp_trx != -1 else ""
+                                val_area = str(row[col_area]).upper() if col_area != -1 else ""
+                                
+                                if region_upper not in val_sdp and region_upper not in val_area:
+                                    continue
+                                
+                                val_status = str(row[col_status]).upper()
+                                if "COMPLETED" not in val_status:
+                                    continue
+                                
+                                amount_val = row[col_amount_debit]
+                                if pd.notna(amount_val):
+                                    try:
+                                        amount = float(str(amount_val).replace(",", ""))
+                                        total_amount_debit_all_completed += amount
+                                    except:
+                                        pass
+                            except:
+                                continue
+            except:
+                total_amount_debit_all_completed = 0
+            
+            # HITUNG OUTER: Total Amount_Debit (Reload & Data Pack, completed) - Total Paid In
+            total_amount_debit_completed = 0
+            try:
+                df_trx = None
+                trx_sheet_name = None
+                for name in dfs.keys():
+                    if "TRX" in name.upper() or "TRANSACTION" in name.upper():
+                        df_trx = dfs[name]
+                        trx_sheet_name = name
+                        break
+                
+                if df_trx is None:
+                    df_trx = get_sheet_fuzzy(dfs, "TRX")
+                
+                if df_trx is not None and len(df_trx) > 2:
+                    # Cari header row dan kolom
+                    header_row = 0
+                    col_sdp_trx = -1
+                    col_area = -1
+                    col_trx_type = -1
+                    col_amount_debit = -1
+                    col_status = -1
+                    
+                    # Scan row 0-5 untuk menemukan kolom
+                    for r in range(min(5, len(df_trx))):
+                        row_vals = [str(x).upper() for x in df_trx.iloc[r].tolist()]
+                        for i, v in enumerate(row_vals):
+                            v_clean = str(v).strip()
+                            if "SDP" in v_clean:
+                                col_sdp_trx = i
+                                header_row = r
+                            if "AREA" in v_clean:
+                                col_area = i
+                                header_row = r
+                            if "TRANSACTION" in v_clean and "TYPE" in v_clean:
+                                col_trx_type = i
+                            if "AMOUNT" in v_clean and "DEBIT" in v_clean:
+                                col_amount_debit = i
+                            if "TRANSACTION" in v_clean and "STATUS" in v_clean:
+                                col_status = i
+                        
+                        if col_trx_type != -1 and (col_sdp_trx != -1 or col_area != -1) and col_amount_debit != -1 and col_status != -1:
+                            break
+                    
+                    # Filter dan hitung
+                    if col_trx_type != -1 and col_amount_debit != -1 and col_status != -1:
+                        region_upper = wilayah.upper()
+                        for idx in range(header_row + 1, len(df_trx)):
+                            try:
+                                row = df_trx.iloc[idx]
+                                
+                                # Cek wilayah
+                                val_sdp = str(row[col_sdp_trx]).upper() if col_sdp_trx != -1 else ""
+                                val_area = str(row[col_area]).upper() if col_area != -1 else ""
+                                
+                                if region_upper not in val_sdp and region_upper not in val_area:
+                                    continue
+                                
+                                # Cek transaction type
+                                val_type = str(row[col_trx_type]).upper()
+                                if not ("RELOAD" in val_type or "DATA" in val_type):
+                                    continue
+                                
+                                # Cek status
+                                val_status = str(row[col_status]).upper()
+                                if "COMPLETED" not in val_status:
+                                    continue
+                                
+                                # Ambil Amount Debit
+                                amount_val = row[col_amount_debit]
+                                if pd.notna(amount_val):
+                                    try:
+                                        amount = float(str(amount_val).replace(",", ""))
+                                        total_amount_debit_completed += amount
+                                    except:
+                                        pass
+                            except:
+                                continue
+            except:
+                total_amount_debit_completed = 0
+            
+            # Hitung Outer
+            outer_reload = total_amount_debit_completed - total_paid_in_reload
             
             with st.expander("🔍 DEBUG: TRX & COM Match", expanded=False):
                 st.warning("Klik untuk melihat detail kalkulasi transaksi match...")
                 debug_match_count, debug_paid_in, debug_amount_debit = calculate_transaction_match(dfs, wilayah, transaction_types=['Indosat Reload', 'Purchase Data Package'], debug=True)
                 st.info(f"✓ Hasil Match: Match={debug_match_count}, Paid In={debug_paid_in}, Amount Debit={debug_amount_debit}")
 
+            # ==========================================
+            # URUTKAN METRIK DARI UMUM KE SPESIFIK
+            # ==========================================
+            
+            st.markdown("### 📊 Analisis Reload & Data Pack")
+            
+            # 1. PALING UMUM: Total Amount Debit (SEMUA transaksi, completed)
+            st.markdown("**Level 1 - Overview (Semua Transaksi Completed)**")
+            st.metric("💰 Total Amount Debit (Semua Transaksi)", format_idr_jt(total_amount_debit_all_completed))
+            
+            st.markdown("---")
+            
+            # 2-3. FILTER SPESIFIK RELOAD & DATA PACK: Match dan Amount Debit
+            st.markdown("**Level 2 - Reload & Data Pack Spesifik**")
             c1, c2 = st.columns(2)
             with c1: 
-                st.metric("Jumlah Transaksi Match", f"{t_tr_reload:,.0f}")
+                st.metric("📌 Jumlah Transaksi Match", f"{t_tr_reload:,.0f}")
             with c2:
-                st.metric("Total Amount Debit", format_idr_jt(total_debit_reload))
+                st.metric("💳 Total Amount Debit (Match)", format_idr_jt(total_debit_reload))
 
-            st.divider()
+            st.markdown("---")
 
+            # 4-6. DETAIL: Paid In, Achievement, Outer
+            st.markdown("**Level 3 - Detail & Analisis**")
             c_reload1, c_reload2, c_reload3 = st.columns(3)
             with c_reload1:
-                st.metric("Total Paid In (Reload & Data Pack)", format_idr_jt(total_paid_in_reload))
+                st.metric("✅ Total Paid In", format_idr_jt(total_paid_in_reload))
             with c_reload2:
-                st.metric("Reload Income (2.5%)", format_idr_jt(reload_income), delta=f"= {format_idr_jt(total_paid_in_reload)} × 2.5%", delta_color="normal")
+                achievement_pct = (total_paid_in_reload / total_debit_reload * 100) if total_debit_reload > 0 else 0
+                st.metric("📈 Achievement %", f"{achievement_pct:.2f}%")
             with c_reload3:
-                achievement_pct = (reload_income / total_debit_reload * 100) if total_debit_reload > 0 else 0
-                st.metric("Achievement %", f"{achievement_pct:.2f}%")
+                st.metric("⚠️ Outer", format_idr_jt(outer_reload))
 
             st.divider()
 
@@ -2462,20 +2653,20 @@ elif menu == "🧮 Kalkulator Strategi":
             with summary_cols[0]:
                 st.metric("Upfront (1.5%)", format_idr_jt(upfront_margin_income))
             with summary_cols[1]:
-                st.metric("Reload (2.5%)", format_idr_jt(reload_income))
+                st.metric("Reload & Data Pack", format_idr_jt(total_paid_in_reload))
             with summary_cols[2]:
-                st.metric("Voucher (2.5%)", format_idr_jt(total_voucher_reward))
+                st.metric("Voucher Redemption", format_idr_jt(total_voucher_reward))
             with summary_cols[3]:
-                st.metric("Outer (0.5%)", format_idr_jt(total_outer_benefit))
+                st.metric("Outer Transaction", format_idr_jt(total_outer_benefit))
 
             # TOTAL KESELURUHAN
-            total_income_all = upfront_margin_income + reload_income + total_voucher_reward + total_outer_benefit
+            total_income_all = upfront_margin_income + total_paid_in_reload + total_voucher_reward + total_outer_benefit
 
             # Update session state dengan total benefit bulan ini
             st.session_state.monthly_total_benefits[pilih_bulan.upper()] = total_income_all
 
             st.success(f"✅ **TOTAL INCOME FIX:** {format_idr_jt(total_income_all)}")
-            st.info(f"📊 Komponen: Upfront {format_idr_jt(upfront_margin_income)} + Reload {format_idr_jt(reload_income)} + Voucher {format_idr_jt(total_voucher_reward)} + Outer {format_idr_jt(total_outer_benefit)}")
+            st.info(f"📊 Komponen: Upfront {format_idr_jt(upfront_margin_income)} + Reload & Data Pack {format_idr_jt(total_paid_in_reload)} + Voucher Redemption {format_idr_jt(total_voucher_reward)} + Outer Transaction {format_idr_jt(total_outer_benefit)}")
 
         else:
             # ==========================================
@@ -2657,6 +2848,333 @@ elif menu == "🧮 Kalkulator Strategi":
 
             st.success(f"✅ **TOTAL INCOME FIX:** {format_idr_jt(total_income_all_tri)}")
             st.info(f"📊 Komponen: Upfront {format_idr_jt(upfront_margin_income_tri)} + Voucher {format_idr_jt(total_voucher_reward_tri)} + Outer {format_idr_jt(total_outer_benefit_tri)}")
+
+    # ==========================================
+    # TAB 3: TACTICAL INCOME
+    # ==========================================
+    with tab_tactical:
+        st.markdown("### 🎯 Tactical Income Calculator")
+        st.info("Hitung tactical income berdasarkan syarat tertentu dari pencapaian KPI & Compliance")
+        
+        # Get region config
+        tactical_config = st.session_state.kpi_calculator_config["regions"][wilayah]
+        prepaid_revenue = tactical_config.get("prepaid_revenue", 1_000_000_000)
+        
+        # ==========================================
+        # JENIS 1: ADDITIONAL FEE SLA (+0.9% PREPAID REVENUE)
+        # ==========================================
+        st.markdown("#### 1️⃣ ADDITIONAL FEE SLA (+0.9% Prepaid Revenue)")
+        st.caption("Syarat: Semua KPI score ≥ 100% AND RGU GA Compliance ≥ 80%")
+        
+        # Get achievement data dari Tab 1
+        tactical_achievement = st.session_state.get("calculator_achievement", {})
+        
+        # Hitung score setiap KPI
+        kpi_scores = {}
+        for metric in tactical_config["kpi_metrics"]:
+            metric_name = metric["name"]
+            target = metric["target"]
+            achievement_data = tactical_achievement.get(metric_name, {"target": target, "actual": 0})
+            actual = achievement_data.get("actual", 0) if isinstance(achievement_data, dict) else achievement_data
+            score = (actual / target * 100) if target > 0 else 0
+            kpi_scores[metric_name] = score
+        
+        # Ambil RGU GA Compliance
+        rgu_ga_compliance = tactical_achievement.get("ach_rgu_ga", 0) * 100
+        
+        # Check syarat
+        all_kpi_above_100 = all(score >= 100 for score in kpi_scores.values())
+        rgu_ga_above_80 = rgu_ga_compliance >= 80
+        condition_met = all_kpi_above_100 and rgu_ga_above_80
+        
+        # Display status syarat
+        st.markdown("**📋 Status Syarat:**")
+        status_cols = st.columns(2)
+        
+        with status_cols[0]:
+            st.markdown("**Syarat 1: Semua KPI Score ≥ 100%**")
+            for kpi_name, score in kpi_scores.items():
+                status_icon = "✅" if score >= 100 else "❌"
+                st.write(f"{status_icon} {kpi_name}: {format_idr_jt(score) if score != int(score) else f'{score:.2f}'}%")
+        
+        with status_cols[1]:
+            st.markdown("**Syarat 2: RGU GA Compliance**")
+            status_icon = "✅" if rgu_ga_above_80 else "❌"
+            st.write(f"{status_icon} RGU GA Compliance: {rgu_ga_compliance:.2f}%")
+        
+        st.markdown("---")
+        
+        # Hitung income
+        if condition_met:
+            additional_fee_sla = prepaid_revenue * 0.009
+            st.success(f"✅ **Syarat Terpenuhi!**")
+            st.markdown(f"""
+            **ADDITIONAL FEE SLA:**
+            - Tarif: 0.9% × Prepaid Revenue
+            - Perhitungan: 0.9% × {format_idr_jt(prepaid_revenue)}
+            - **INCOME: {format_idr_jt(additional_fee_sla)}**
+            """)
+        else:
+            additional_fee_sla = 0
+            st.warning(f"❌ **Syarat Tidak Terpenuhi**")
+            st.markdown(f"""
+            Alasan tidak terpenuhi:
+            - {'✅ Semua KPI ≥ 100%' if all_kpi_above_100 else '❌ Ada KPI < 100%'}
+            - {'✅ RGU GA Compliance ≥ 80%' if rgu_ga_above_80 else '❌ RGU GA Compliance < 80%'}
+            
+            Income: **Rp 0**
+            """)
+        
+        st.markdown("---")
+        
+        # ==========================================
+        # JENIS 2: TERRITORY DEVELOPMENT SUPPORT (TDS)
+        # ==========================================
+        st.markdown("#### 2️⃣ TERRITORY DEVELOPMENT SUPPORT (TDS) - Growth-Based Fee")
+        st.caption("Income berdasarkan pertumbuhan dari baseline")
+        
+        with st.expander("⚙️ Setup Growth Brackets (Konfigurasi)", expanded=False):
+            st.markdown("**Konfigurasi Growth Bracket dan Fee Percentage**")
+            
+            brackets = st.session_state.tds_growth_brackets
+            new_brackets = []
+            
+            for idx, bracket in enumerate(brackets):
+                st.markdown(f"**Bracket {idx + 1}**")
+                col1, col2, col3, col4, col5 = st.columns([1.2, 1.2, 0.8, 1, 0.8])
+                
+                with col1:
+                    min_g = st.number_input(
+                        f"Min Growth %",
+                        value=bracket["min_growth"],
+                        step=0.5,
+                        key=f"tds_min_{idx}"
+                    )
+                
+                with col2:
+                    has_max = bracket["max_growth"] is not None
+                    max_enabled = st.checkbox(
+                        "Set Max",
+                        value=has_max,
+                        key=f"tds_has_max_{idx}"
+                    )
+                
+                with col3:
+                    if max_enabled:
+                        max_g = st.number_input(
+                            f"Max %",
+                            value=bracket["max_growth"] if bracket["max_growth"] is not None else 10.0,
+                            step=0.5,
+                            key=f"tds_max_{idx}"
+                        )
+                    else:
+                        st.markdown("**∞**")
+                        max_g = None
+                
+                with col4:
+                    fee_p = st.number_input(
+                        f"Fee %",
+                        value=bracket["fee_percent"],
+                        step=0.1,
+                        key=f"tds_fee_{idx}"
+                    )
+                
+                with col5:
+                    if len(brackets) > 1:
+                        if st.button("❌", key=f"tds_del_{idx}"):
+                            st.session_state.tds_growth_brackets.pop(idx)
+                            st.rerun()
+                
+                new_brackets.append({
+                    "min_growth": min_g,
+                    "max_growth": max_g,
+                    "fee_percent": fee_p
+                })
+            
+            st.session_state.tds_growth_brackets = new_brackets
+            
+            if st.button("➕ Add New Bracket"):
+                st.session_state.tds_growth_brackets.append({
+                    "min_growth": 0.0,
+                    "max_growth": 10.0,
+                    "fee_percent": 1.0
+                })
+                st.rerun()
+        
+        st.markdown("**📥 Input Growth Data:**")
+        tds_input_cols = st.columns(2)
+        
+        with tds_input_cols[0]:
+            baseline_tertiary = st.number_input(
+                "Baseline Sales (Rp)",
+                value=100_000_000,
+                step=10_000_000,
+                key="tds_baseline"
+            )
+        
+        with tds_input_cols[1]:
+            actual_tertiary = st.number_input(
+                "Actual Sales (Rp)",
+                value=107_500_000,
+                step=10_000_000,
+                key="tds_actual"
+            )
+        
+        if baseline_tertiary > 0:
+            growth_pct = ((actual_tertiary - baseline_tertiary) / baseline_tertiary) * 100
+        else:
+            growth_pct = 0
+        
+        matched_bracket = None
+        for bracket in st.session_state.tds_growth_brackets:
+            min_g = bracket["min_growth"]
+            max_g = bracket["max_growth"]
+            
+            if max_g is None:
+                if growth_pct >= min_g:
+                    matched_bracket = bracket
+                    break
+            else:
+                if min_g <= growth_pct <= max_g:
+                    matched_bracket = bracket
+                    break
+        
+        st.markdown("**📊 Calculation Result:**")
+        result_cols = st.columns(4)
+        
+        with result_cols[0]:
+            st.metric("Baseline", format_idr_jt(baseline_tertiary))
+        with result_cols[1]:
+            st.metric("Actual", format_idr_jt(actual_tertiary))
+        with result_cols[2]:
+            st.metric("Growth %", f"{growth_pct:.2f}%")
+        with result_cols[3]:
+            if matched_bracket:
+                st.metric("Fee %", f"{matched_bracket['fee_percent']:.2f}%")
+            else:
+                st.metric("Fee %", "N/A")
+        
+        if matched_bracket and actual_tertiary > 0:
+            tds_fee_pct = matched_bracket["fee_percent"] / 100
+            tds_income = actual_tertiary * tds_fee_pct
+            
+            st.success(f"✅ **TERRITORY DEVELOPMENT SUPPORT (TDS)**")
+            max_display = f"{matched_bracket['max_growth']:.2f}%" if matched_bracket['max_growth'] is not None else "∞"
+            st.markdown(f"""
+            **Calculation:**
+            - Bracket: Growth {matched_bracket['min_growth']:.2f}% - {max_display}
+            - Fee Rate: {matched_bracket['fee_percent']:.2f}% × {format_idr_jt(actual_tertiary)}
+            - **INCOME: {format_idr_jt(tds_income)}**
+            """)
+        else:
+            tds_income = 0
+            st.warning("⚠️ **Tidak ada bracket yang cocok atau data tidak valid**")
+            st.markdown(f"Income: **Rp 0**")
+        
+        st.markdown("---")
+        
+        # ==========================================
+        # JENIS 3: ADDITIONAL INCOME (OPTIONAL/DINAMIS)
+        # ==========================================
+        st.markdown("#### 3️⃣ ADDITIONAL INCOME (Optional)")
+        st.caption("Income tambahan yang bisa ditambahkan sesuai kebutuhan")
+        
+        enable_third = st.checkbox(
+            "✅ Aktifkan Additional Income",
+            value=st.session_state.third_income_enabled,
+            key="third_income_toggle"
+        )
+        st.session_state.third_income_enabled = enable_third
+        
+        third_income_total = 0
+        
+        if enable_third:
+            st.markdown("**📋 Daftar Additional Income Items:**")
+            
+            items = st.session_state.third_income_items
+            new_items = []
+            
+            for idx, item in enumerate(items):
+                col1, col2, col3 = st.columns([2, 1.5, 0.5])
+                
+                with col1:
+                    income_name = st.text_input(
+                        "Nama Income",
+                        value=item["name"],
+                        key=f"third_income_name_{idx}",
+                        placeholder="contoh: Bonus Tambahan"
+                    )
+                
+                with col2:
+                    income_amount = st.number_input(
+                        "Jumlah (Rp)",
+                        value=item["amount"],
+                        step=1_000_000,
+                        key=f"third_income_amount_{idx}"
+                    )
+                
+                with col3:
+                    if st.button("❌", key=f"third_income_delete_{idx}"):
+                        st.session_state.third_income_items.pop(idx)
+                        st.rerun()
+                
+                new_items.append({
+                    "name": income_name,
+                    "amount": income_amount
+                })
+                third_income_total += income_amount
+            
+            st.session_state.third_income_items = new_items
+            
+            col_add = st.columns([0.3, 0.7])
+            with col_add[0]:
+                if st.button("➕ Tambah Income", key="third_income_add"):
+                    st.session_state.third_income_items.append({
+                        "name": "Income Baru",
+                        "amount": 0
+                    })
+                    st.rerun()
+            
+            st.markdown("---")
+            
+            st.markdown("**📊 Summary Additional Income:**")
+            if new_items:
+                for item in new_items:
+                    st.write(f"• **{item['name']}**: {format_idr_jt(item['amount'])}")
+                st.markdown(f"**Total Additional Income: {format_idr_jt(third_income_total)}**")
+            else:
+                st.info("Belum ada item income yang ditambahkan")
+        else:
+            third_income_total = 0
+        
+        st.markdown("---")
+        
+        # ==========================================
+        # TOTAL TACTICAL INCOME (SUMMARY)
+        # ==========================================
+        st.markdown("#### 💰 TOTAL TACTICAL INCOME")
+        
+        total_tactical_income = additional_fee_sla + tds_income + third_income_total
+        
+        summary_cols = st.columns(4)
+        with summary_cols[0]:
+            st.metric("Additional Fee SLA", format_idr_jt(additional_fee_sla))
+        with summary_cols[1]:
+            st.metric("TDS Income", format_idr_jt(tds_income))
+        with summary_cols[2]:
+            st.metric("Additional Income", format_idr_jt(third_income_total))
+        with summary_cols[3]:
+            st.metric("TOTAL", format_idr_jt(total_tactical_income), delta="Tactical")
+        
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px; color: white;">
+            <div style="font-size: 14px; opacity: 0.9;">TOTAL TACTICAL INCOME</div>
+            <div style="font-size: 32px; font-weight: bold; margin-top: 10px;">{format_idr_jt(total_tactical_income)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Store tactical income ke session state untuk digunakan di Tab Total Income
+        st.session_state.total_tactical_income = total_tactical_income
     
     # ==========================================
     # ==========================================
@@ -2690,17 +3208,20 @@ elif menu == "🧮 Kalkulator Strategi":
         
         result_maksimal_total = calculate_metrics(regional_config, maksimal_achievement_total)
         final_fee_maksimal = result_maksimal_total["final_fee"]
-        total_income_maksimal = final_fee_maksimal + total_income_fix
+        total_tactical_income_maksimal = st.session_state.get("total_tactical_income", 0)
+        total_income_maksimal = final_fee_maksimal + total_income_fix + total_tactical_income_maksimal
         
-        maks_cols = st.columns(3)
+        maks_cols = st.columns(4)
         with maks_cols[0]:
             st.metric("Final Fee (Maksimal)", format_currency(final_fee_maksimal))
         with maks_cols[1]:
-            st.metric("Total Income Fix", format_idr_jt(total_income_fix))
+            st.metric("Fix Income", format_currency(total_income_fix))
         with maks_cols[2]:
-            st.metric("TOTAL INCOME", format_idr_jt(total_income_maksimal))
+            st.metric("Tactical Income", format_currency(total_tactical_income_maksimal))
+        with maks_cols[3]:
+            st.metric("TOTAL INCOME", format_currency(total_income_maksimal))
         
-        st.success(f"✅ Maksimal = Rp {final_fee_maksimal:,.0f} + Rp {total_income_fix:,.0f} = **Rp {total_income_maksimal:,.0f}**")
+        st.success(f"✅ Maksimal = {format_currency(final_fee_maksimal)} + {format_currency(total_income_fix)} + {format_currency(total_tactical_income_maksimal)} = **{format_currency(total_income_maksimal)}**")
         
         # Store Maksimal values
         st.session_state.final_fee_maksimal = final_fee_maksimal
@@ -2718,15 +3239,27 @@ elif menu == "🧮 Kalkulator Strategi":
         
         result_custom_total = calculate_metrics(regional_config, current_achievement_total)
         final_fee_custom = result_custom_total["final_fee"]
-        total_income_custom = final_fee_custom + total_income_fix
+        total_tactical_income_custom = st.session_state.get("total_tactical_income", 0)
+        total_income_custom = final_fee_custom + total_income_fix + total_tactical_income_custom
         
-        custom_cols = st.columns(3)
+        custom_cols = st.columns(4)
         with custom_cols[0]:
             st.metric("Final Fee (Custom)", format_currency(final_fee_custom))
         with custom_cols[1]:
-            st.metric("Total Income Fix", format_idr_jt(total_income_fix))
+            st.metric("Fix Income", format_currency(total_income_fix))
         with custom_cols[2]:
-            st.metric("TOTAL INCOME", format_idr_jt(total_income_custom))
+            st.metric("Tactical Income", format_currency(total_tactical_income_custom))
+        with custom_cols[3]:
+            st.metric("TOTAL INCOME", format_currency(total_income_custom))
+        
+        if total_income_custom > 0:
+            st.info(f"📌 Custom = {format_currency(final_fee_custom)} + {format_currency(total_income_fix)} + {format_currency(total_tactical_income_custom)} = **{format_currency(total_income_custom)}**")
+        else:
+            st.warning("⚠️ Silakan isi Tab 1 (SLA/KPI Insentif), Tab 2 (Fix Income), dan Tab 3 (Tactical Income) terlebih dahulu")
+        
+        # Store Custom values
+        st.session_state.final_fee_custom = final_fee_custom
+        st.session_state.total_income_custom = total_income_custom
         
         if total_income_custom > 0:
             st.info(f"📌 Custom = Rp {final_fee_custom:,.0f} + Rp {total_income_fix:,.0f} = **Rp {total_income_custom:,.0f}**")
@@ -3058,7 +3591,14 @@ elif menu == "🧮 Kalkulator Strategi":
                     if breakdown['shortfall'] > 0:
                         st.write(f"**{kpi_name}** ⚠️ ADA SHORTFALL")
                         st.write(f"  • Target: {breakdown['target']} | Actual: {breakdown['actual']} | Shortfall: {breakdown['shortfall']} unit")
-                        st.write(f"  • Rumus: (Target - Actual) × Cost/Unit = ({breakdown['target']} - {breakdown['actual']}) × {format_idr_jt(breakdown['cost_per_unit'])}")
+                        
+                        # Tampilkan rumus berbeda berdasarkan jenis KPI
+                        if kpi_name == "Trade Supply":
+                            st.write(f"  • Rumus: Cost = Cost Per Unit (langsung, tanpa × Shortfall)")
+                            st.write(f"  • Perhitungan: {format_idr_jt(breakdown['cost_per_unit'])}")
+                        else:
+                            st.write(f"  • Rumus: (Target - Actual) × Cost Per Unit = ({breakdown['target']} - {breakdown['actual']}) × {format_idr_jt(breakdown['cost_per_unit'])}")
+                        
                         st.write(f"  • **Biaya yang diperlukan: Rp {breakdown['total_cost']:,.0f}**")
                     else:
                         st.write(f"**{kpi_name}** ✅ SUDAH TERCAPAI")
@@ -3200,42 +3740,73 @@ elif menu == "🧮 Kalkulator Strategi":
         achieved_kpis = [k for k in kpi_analysis if k['action'] == 'MAINTAIN']
         
         if critical_kpis:
-            st.warning("🔴 **CRITICAL KPI - HARUS DIPUSH:**")
+            st.error("🔴 **KPI KRITIS - HARUS SEGERA DIPUSH!**")
             for kpi in critical_kpis:
                 st.markdown(f"""
-                **{kpi['name']}**
-                - Status: {kpi['achievement_pct']:.1f}% (di bawah minimum {MINIMUM_SAFE_THRESHOLD*100:.0f}%)
-                - Actual: {kpi['actual']} / Target: {kpi['target']} (shortfall: {kpi['shortfall']} unit)
-                - **Biaya untuk achieve: Rp {kpi['cost_to_achieve']:,.0f}**
-                - Potential income gain: Rp {kpi['potential_income_gain']:,.0f}
-                - ROI: Rp {kpi['roi']:,.0f}
-                - **SARAN: PRIORITAS PUSH KPI INI TERLEBIH DAHULU**
-                """)
+**⚠️ {kpi['name']}**
+
+**📊 Status Darurat:**
+- Pencapaian: **{kpi['achievement_pct']:.1f}%** (⚠️ KRITIS! Di bawah 70% = minimum safe)
+- Target: **{kpi['target']} unit** | Yang tercapai: **{kpi['actual']} unit** | Masih kurang: **{kpi['shortfall']} unit**
+
+**💸 Untuk Capai Target:**
+- Biaya yang diperlukan: **Rp {kpi['cost_to_achieve']:,.0f}**
+- Income yang bakal nambah: **Rp {kpi['potential_income_gain']:,.0f}**
+- **Profit setelah push: ✅ Rp {kpi['roi']:,.0f}**
+
+**🚨 ACTION PLAN:**
+✅ **PUSH KPI INI ADALAH PRIORITAS!** Tidak ada pilihan lain
+- Jika tidak dipush, KPI akan terus jatuh dan merugikan profit keseluruhan
+- Dengan push, akan dapat kembali ke zona aman dan nambah income
+""")
+
         
         if optional_kpis:
-            st.info("🟢 **OPTIONAL KPI - BISA MAINTAIN ATAU PUSH:**")
+            st.info("🟢 **KPI AMAN - BOLEH MAINTAIN ATAU PUSH TERGANTUNG BUDGET:**")
             for kpi in optional_kpis:
+                roi_status = "💰 MENGUNTUNGKAN" if kpi['roi'] > 0 else "⚠️ RUGI"
+                roi_emoji = "✅" if kpi['roi'] > 0 else "❌"
+                
                 st.markdown(f"""
-                **{kpi['name']}**
-                - Status: {kpi['achievement_pct']:.1f}% (aman, sudah di atas {MINIMUM_SAFE_THRESHOLD*100:.0f}%)
-                - Actual: {kpi['actual']} / Target: {kpi['target']} (shortfall: {kpi['shortfall']} unit)
-                - Biaya untuk achieve: Rp {kpi['cost_to_achieve']:,.0f}
-                - Potential income gain: Rp {kpi['potential_income_gain']:,.0f}
-                - ROI: Rp {kpi['roi']:,.0f}
-                - **SARAN: Bisa dipertahankan atau di-push tergantung budget. ROI {('positif ✅' if kpi['roi'] > 0 else 'negatif ❌')}**
-                """)
+**🎯 {kpi['name']}**
+
+**📊 Kondisi Saat Ini:**
+- Pencapaian: **{kpi['achievement_pct']:.1f}%** (Aman! Sudah melampaui batas minimum 70%)
+- Target: **{kpi['target']} unit** | Yang tercapai: **{kpi['actual']} unit** | Masih kurang: **{kpi['shortfall']} unit**
+
+**💸 Jika Di-Push ke Target Penuh:**
+- Biaya yang diperlukan: **Rp {kpi['cost_to_achieve']:,.0f}**
+- Bonus income yang masuk: **Rp {kpi['potential_income_gain']:,.0f}**
+- **Selisih (Profit/Rugi): {roi_emoji} Rp {kpi['roi']:,.0f}** → {roi_status}
+
+**💡 Rekomendasi:**
+""")
+                
+                if kpi['roi'] > 0:
+                    st.success(f"""
+✅ **WORTH IT UNTUK PUSH!** 
+- Jika ada budget Rp {kpi['cost_to_achieve']:,.0f}, push KPI ini akan nambah profit Rp {kpi['roi']:,.0f}
+- Ini bagus untuk growth, tidak akan rugi
+""")
+                else:
+                    st.warning(f"""
+⚠️ **LEBIH BAIK JANGAN PUSH (ROI Negatif)**
+- Push KPI ini butuh Rp {kpi['cost_to_achieve']:,.0f} tapi hanya dapat Rp {kpi['potential_income_gain']:,.0f}
+- Akan rugi Rp {abs(kpi['roi']):,.0f}
+- Lebih baik pakai budget untuk hal lain yang lebih menguntungkan
+""")
         
         if achieved_kpis:
-            st.success(f"✅ **ACHIEVED KPI - SUDAH TERCAPAI & MAINTAIN:**")
+            st.success(f"✅ **KPI TERCAPAI - BAGUS! MAINTAIN SAJA:**")
             for kpi in achieved_kpis:
-                st.markdown(f"- **{kpi['name']}:** {kpi['achievement_pct']:.1f}% ✅ Tidak perlu biaya tambahan")
+                st.markdown(f"- **{kpi['name']}:** {kpi['achievement_pct']:.1f}% ✅ Sudah capai target. Tidak perlu biaya tambahan, terus dipertahankan")
         
         st.divider()
         
         # =======================================
         # FINAL STRATEGY RECOMMENDATION
         # =======================================
-        st.markdown("#### 📋 FINAL STRATEGY RECOMMENDATION")
+        st.markdown("#### 📋 REKOMENDASI AKHIR - STRATEGI TERBAIK UNTUK ANDA")
         
         # Calculate total cost if push semua critical
         total_critical_cost = sum(k['cost_to_achieve'] for k in critical_kpis)
@@ -3251,88 +3822,192 @@ elif menu == "🧮 Kalkulator Strategi":
         if rgu_ga_critical:
             # RGU GA critical adalah prioritas TERTINGGI
             recommendation = f"""
-            🔴 **STRATEGI EMERGENCY - RGU GA COMPLIANCE KRITIS**
-            
-            **⚠️ PRIORITAS TERTINGGI: PUSH RGU GA KE 80%+**
-            
-            Jika RGU GA tidak di-push ke 80%:
-            - **Final Fee = Rp 0 (TIDAK DAPAT INSENTIF SAMA SEKALI)**
-            - Profit hilang sepenuhnya
-            
-            **REKOMENDASI UTAMA:**
-            1. **HARUS PUSH RGU GA TERLEBIH DAHULU** - Biaya: Rp {rgu_ga_push_cost:,.0f}
-               - Benefit dari push RGU GA: Setidaknya dapat insentif dari Tab 1 & 2
-            
-            2. Setelah RGU GA aman, baru push KPI lainnya jika budget memungkinkan
-               - Additional KPI push cost: Rp {sum(k['cost_to_achieve'] for k in critical_kpis):,.0f}
-            
-            **TOTAL COST UNTUK ACHIEVE SAFE STATE: Rp {total_critical_cost:,.0f}**
-            **ESTIMATED NET PROFIT: Rp {net_custom_with_rgu:,.0f}**
-            """
+🔴 **SITUASI DARURAT - HARUS SEGERA ACTION!**
+
+**❌ MASALAH BESAR:** RGU GA Compliance Kamu KRITIS!
+
+Jika RGU GA tidak dipush ke 80%+:
+- **Semua insentif hangus = Profit menjadi Rp 0**
+- Berarti semua effort kamu sia-sia tidak dapat apa-apa!
+
+---
+
+**✅ SOLUSI (Action Plan):**
+
+**STEP 1 - EMERGENCY PRIORITY (HARUS DIKERJAKAN DULUAN):**
+Push RGU GA ke 80%+
+- Biaya yang diperlukan: **Rp {rgu_ga_push_cost:,.0f}**
+- Benefit: Dapat kembali menerima insentif (tidak jadi Rp 0)
+- Status: **TIDAK ADA PILIHAN LAIN** - Ini mandatory!
+
+**STEP 2 - AFTER RGU GA AMAN (Jika Budget Masih Ada):**
+Push KPI yang masih critical lainnya
+- Total biaya tambahan: **Rp {sum(k['cost_to_achieve'] for k in critical_kpis):,.0f}**
+- Potential income tambahan: **Rp {total_critical_income_gain:,.0f}**
+
+---
+
+**📊 HASIL AKHIR JIKA SEMUA DIKERJAKAN:**
+- Total investment: **Rp {total_critical_cost:,.0f}**
+- Profit yang didapat: **Rp {net_custom_with_rgu:,.0f}**
+"""
             st.error(recommendation)
         
         elif not critical_kpis:
-            recommendation = f"""
-            ✅ **STRATEGI AMAN - SEMUA KPI ALREADY SAFE**
+            # Check if profit is positive or negative
+            current_profit = net_custom_with_rgu if rgu_ga_critical else net_custom
             
-            Semua KPI sudah mencapai minimum safe threshold (≥70%). 
-            - Current Net Profit: Rp {net_custom_with_rgu if rgu_ga_critical else net_custom:,.0f}
-            - Current Status: AMAN ✅
+            if current_profit > 0:
+                recommendation = f"""
+✅ **SITUASI BAIK - SEMUA KPI AMAN & PROFIT POSITIF**
+
+Semua KPI kamu sudah di atas 70% (safe zone) dan profit dalam kondisi positif.
+- Status sekarang: **AMAN & HEALTHY ✅**
+- Profit yang sudah terjamin: **Rp {current_profit:,.0f}**
+
+---
+
+**PILIH SATU STRATEGI:**
+
+**OPSI 1 - MAINTAIN (SAFE - Tanpa Resiko)**
+✅ Pertahankan kondisi sekarang, jangan push apapun
+✅ Profit sudah terjamin: Rp {current_profit:,.0f}
+✅ Risk level: RENDAH
+⏱️ Waktu: Bisa focus di hal lain
+
+**OPSI 2 - PUSH GROWTH (AGGRESSIVE - Medium Risk)**
+Jika masih ada budget, push KPI yang ROI-nya positif untuk nambah profit
+"""
+                if optional_kpis:
+                    best_optional = max(optional_kpis, key=lambda x: x['roi'])
+                    recommendation += f"""
+💡 **Rekomendasi:** {best_optional['name']} adalah pilihan terbaik
+- Biaya: Rp {best_optional['cost_to_achieve']:,.0f}
+- Yang bakal didapat: Rp {best_optional['potential_income_gain']:,.0f}
+- Profit nambah: Rp {best_optional['roi']:,.0f} ✅
+- Risk: MEDIUM (tapi ROI positif, jadi okay)
+"""
+                
+                st.success(recommendation)
             
-            **OPSI STRATEGI:**
-            1. **MAINTAIN (Minimal Risk):** Pertahankan current achievement. Profit tetap Rp {net_custom_with_rgu if rgu_ga_critical else net_custom:,.0f}
-            2. **LIGHT PUSH (Medium Risk):** Push optional KPI dengan ROI positif
-            """
-            if optional_kpis:
-                best_optional = max(optional_kpis, key=lambda x: x['roi'])
-                recommendation += f"\n            - Fokus push {best_optional['name']} (ROI: Rp {best_optional['roi']:,.0f})"
-            
-            st.success(recommendation)
+            else:
+                # Profit negatif/minus - ini bukan situasi aman!
+                recommendation = f"""
+⚠️ **SITUASI PERLU PERHATIAN - KPI AMAN TAPI PROFIT MASIH MINUS!**
+
+Meskipun semua KPI di atas 70% (safe), profit kamu masih MINUS (negatif).
+- Status KPI: AMAN (≥70%) ✅
+- Status Profit: **MINUS - Rp {abs(current_profit):,.0f}** ❌
+
+Ini artinya: Biaya operasional lebih besar dari income yang masuk!
+
+---
+
+**ACTION YANG DIPERLUKAN:**
+
+**OPSI 1 - PUSH GROWTH (Recommended)**
+Kamu perlu push KPI untuk nambah income agar profit jadi positif.
+"""
+                if optional_kpis:
+                    best_optional = max(optional_kpis, key=lambda x: x['roi'])
+                    if best_optional['roi'] > 0:
+                        recommendation += f"""
+💡 **Mulai dari sini:** {best_optional['name']} (ROI positif)
+- Biaya: Rp {best_optional['cost_to_achieve']:,.0f}
+- Income nambah: Rp {best_optional['potential_income_gain']:,.0f}
+- Profit berubah dari minus Rp {abs(current_profit):,.0f} → positif Rp {best_optional['roi']:,.0f}
+✅ Ini adalah path yang benar untuk break-even
+"""
+                
+                recommendation += f"""
+
+**OPSI 2 - TARGET MAKSIMAL (110%)**
+Jika ingin langsung untung banyak, push semua KPI ke 110% target.
+- Estimated profit: **Rp {net_maksimal:,.0f}** (dari minus jadi positif Rp {net_maksimal - current_profit:,.0f}!)
+- Risk: MEDIUM (perlu invest dan effort lebih)
+"""
+                st.warning(recommendation)
         else:
+            total_profit_after_push = (total_income_custom_biaya + total_critical_income_gain) - (cost_custom['total_cost'] + total_critical_cost)
+            
             recommendation = f"""
-            ⚠️ **STRATEGI PUSH - ADA KPI YANG CRITICAL**
-            
-            Ada {len(critical_kpis)} KPI yang masih di bawah minimum safe (< 70%).
-            
-            **REKOMENDASI UTAMA:**
-            Push SEMUA KPI CRITICAL untuk memastikan minimum safe threshold tercapai:
-            - Total Biaya Diperlukan: Rp {total_critical_cost:,.0f}
-            - Potential Income Gain: Rp {total_critical_income_gain:,.0f}
-            - **NET ROI: Rp {total_critical_roi:,.0f}**
-            
-            Dengan push semua critical KPI:
-            - Estimated New Income: Rp {total_income_custom_biaya + total_critical_income_gain:,.0f}
-            - Total Cost: Rp {cost_custom['total_cost'] + total_critical_cost:,.0f}
-            - **Estimated New Net Profit: Rp {(total_income_custom_biaya + total_critical_income_gain) - (cost_custom['total_cost'] + total_critical_cost):,.0f}**
-            """
+⚠️ **SITUASI MEMBUTUHKAN ACTION - ADA KPI YANG JATUH!**
+
+Ada {len(critical_kpis)} KPI yang masih di bawah 70% (critical zone).
+Jika tidak dipush, KPI akan terus drop dan profit akan berkurang.
+
+---
+
+**✅ REKOMENDASI: PUSH SEMUA CRITICAL KPI**
+
+**Investasi yang diperlukan:**
+- Total biaya untuk push semua: **Rp {total_critical_cost:,.0f}**
+
+**Hasil yang didapat:**
+- Income tambahan: **Rp {total_critical_income_gain:,.0f}**
+- Profit setelah dikurangi cost: **Rp {total_critical_roi:,.0f}**
+
+**Perbandingan:**
+- Sebelum push: **Rp {net_custom:,.0f}**
+- Sesudah push: **Rp {total_profit_after_push:,.0f}**
+- Selisih: **Rp {total_profit_after_push - net_custom:,.0f}** (profit bertambah!)
+
+"""
             
             if total_critical_roi > 0:
-                recommendation += f"\n            ✅ ROI POSITIF - SANGAT WORTH IT UNTUK PUSH"
+                recommendation += f"""**✅ WORTH IT! ROI-nya POSITIF.**
+Push semua critical KPI akan nambah profit kamu, bukan rugi!"""
             else:
-                recommendation += f"\n            ❌ ROI NEGATIF - PERTIMBANGKAN ULANG"
+                recommendation += f"""**⚠️ Hati-hati! ROI-nya NEGATIF.**
+Jika push, profit akan berkurang. Pertimbangkan push sebagian saja atau prioritaskan yang ROI-nya positif."""
             
             st.warning(recommendation)
         
         st.divider()
         
         # Additional insights
-        st.markdown("#### 💡 Additional Insights & Tips")
+        st.markdown("#### 💡 TIPS TAMBAHAN UNTUK ANDA")
         insights = []
         
         if net_maksimal > net_custom:
-            insights.append(f"🎯 **Maksimal scenario (110%) lebih profitable Rp {net_maksimal - net_custom:,.0f}**. Pertimbangkan untuk mencapai 110% jika budget memungkinkan.")
+            profit_diff = net_maksimal - net_custom
+            insights.append(f"""
+🎯 **CEILING POTENTIAL:**
+Jika kamu push ke 110% target (maksimal), profit bisa naik **Rp {profit_diff:,.0f}**!
+- Kondisi sekarang: Rp {net_custom:,.0f}
+- Jika semua sempurna (110%): Rp {net_maksimal:,.0f}
+💡 Ini adalah target ideal jika budget & resource memungkinkan.
+""")
         
         if optional_kpis:
             best_optional = max(optional_kpis, key=lambda x: x['roi'])
             if best_optional['roi'] > 0:
-                insights.append(f"💰 **Optional KPI '{best_optional['name']}'** punya ROI positif (Rp {best_optional['roi']:,.0f}). Ini bisa jadi quick win untuk boost profit.")
+                insights.append(f"""
+💰 **QUICK WIN - ROI POSITIF!**
+KPI '{best_optional['name']}' adalah peluang terbaik untuk growth:
+- Butuh investment: Rp {best_optional['cost_to_achieve']:,.0f}
+- Profit yang masuk: Rp {best_optional['roi']:,.0f}
+- Risk level: MEDIUM tapi WORTH IT
+💡 Prioritaskan ini jika ada budget tersisa.
+""")
         
         for kpi in optional_kpis:
             if kpi['roi'] < 0:
-                insights.append(f"❌ **KPI '{kpi['name']}'** memiliki ROI negatif. Jangan push jika hanya untuk mencapai profit maksimal.")
+                insights.append(f"""
+❌ **AVOID PUSHING - ROI NEGATIF!**
+KPI '{kpi['name']}' malah akan mengurangi profit:
+- Cost: Rp {kpi['cost_to_achieve']:,.0f}
+- Income dapat: Rp {kpi['potential_income_gain']:,.0f}
+- Rugi: Rp {abs(kpi['roi']):,.0f}
+💡 Jangan push ini kecuali ada alasan khusus dari management.
+""")
         
         if not insights:
-            insights.append("✅ Status healthy - Monitor KPI secara berkala dan adjust strategi sesuai market condition.")
+            insights.append("""
+✅ **STATUS HEALTHY!**
+KPI kamu dalam kondisi baik, semua dalam kontrol. 
+Terus monitor secara rutin dan adjust sesuai kondisi pasar/target yang berubah.
+""")
         
         for insight in insights:
             st.info(insight)
